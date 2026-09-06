@@ -32,6 +32,8 @@ jobs:
           VITE_SUPABASE_URL: https://epcxzhuypvqowzszvbrq.supabase.co
           VITE_SUPABASE_ANON_KEY: sb_publishable_TqQpaz-qwE8NuHTCVnsTKw_kr2b1q0H
         run: npm run build
+      - name: Preserve SPA routes
+        run: cp dist/index.html dist/404.html
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
