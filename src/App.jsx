@@ -18,7 +18,7 @@ const navByRole = {
   admin: [['Dashboard', '/', Home], ['Centres', '/centres', MapPin], ['Live Monitoring', '/monitoring', Activity], ['Map View', '/map', MapPin], ['Analytics', '/analytics', BarChart3], ['Alerts', '/alerts', AlertTriangle], ['Reports', '/reports', FileText], ['Settings', '/settings', Settings]],
 }
 
-function App() { return <BrowserRouter><Prototype /></BrowserRouter> }
+function App() { return <BrowserRouter basename={window.location.pathname.startsWith('/KisanSetu') ? '/KisanSetu' : undefined}><Prototype /></BrowserRouter> }
 function Prototype() {
   const [role, setRole] = useState(() => localStorage.getItem('sp-role') || 'farmer')
   const [queue, setQueue] = useState(22)
