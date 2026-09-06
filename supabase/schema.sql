@@ -1,0 +1,155 @@
+-- KisanSetu / Smart Procurement database schema
+create extension if not exists "pgcrypto";
+
+create type public.app_role as enum ('farmer', 'operator', 'inspector', 'admin');
+create type public.booking_status as enum ('booked', 'checked_in', 'weighing', 'quality', 'procured', 'cancelled');
+create type public.quality_result as enum ('pending', 'pass', 'not_approved');
+create type public.payment_status as enum ('processing', 'successful', 'failed');
+
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  full_name text not null,
+  farmer_id text unique,
+  phone text,
+  role public.app_role not null default 'farmer',
+  village text,
+  district text,
+  created_at timestamptz not null default now()
+);
+
+create table public.procurement_centres (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  address text not null,
+  distance_km numeric(6,2) default 0,
+  daily_capacity_q numeric(10,2) not null default 0,
+  remaining_capacity_q numeric(10,2) not null default 0,
+  waiting_farmers integer not null default 0,
+  estimated_wait_minutes integer not null default 0,
+  status text not null default 'Normal' check (status in ('Normal', 'Busy', 'Critical')),
+  operating_hours text default '09:00 AM - 05:00 PM',
+  accepted_crops text[] not null default array['Paddy', 'Wheat', 'Maize']
+);
+
+create table public.crops (
+  id uuid primary key default gen_random_uuid(),
+  farmer_id uuid not null references public.profiles(id) on delete cascade,
+  crop_type text not null,
+  quantity_q numeric(10,2) not null check (quantity_q > 0),
+  harvest_date date,
+  preliminary_ready boolean,
+  moisture numeric(6,2),
+  foreign_matter numeric(6,2),
+  village text,
+  district text,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table public.bookings (
+  id uuid primary key default gen_random_uuid(),
+  farmer_id uuid not null references public.profiles(id) on delete cascade,
+  centre_id uuid not null references public.procurement_centres(id),
+  crop_id uuid not null references public.crops(id),
+  token text unique not null,
+  booking_date date not null,
+  time_slot text not null,
+  quantity_q numeric(10,2) not null check (quantity_q > 0),
+  status public.booking_status not null default 'booked',
+  queue_position integer,
+  checked_in_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table public.weighings (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid unique not null references public.bookings(id) on delete cascade,
+  gross_weight_q numeric(10,2) not null check (gross_weight_q >= 0),
+  tare_weight_q numeric(10,2) not null check (tare_weight_q >= 0),
+  net_weight_q numeric(10,2) generated always as (gross_weight_q - tare_weight_q) stored,
+  recorded_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(),
+  check (gross_weight_q >= tare_weight_q)
+);
+
+create table public.quality_inspections (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid unique not null references public.bookings(id) on delete cascade,
+  moisture numeric(6,2),
+  foreign_matter numeric(6,2),
+  result public.quality_result not null default 'pending',
+  rejection_reason text,
+  recommended_action text,
+  inspected_by uuid references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table public.procurements (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid unique not null references public.bookings(id) on delete cascade,
+  receipt_id text unique not null,
+  price_per_q numeric(10,2) not null,
+  net_quantity_q numeric(10,2) not null,
+  total_amount numeric(12,2) generated always as (price_per_q * net_quantity_q) stored,
+  confirmed_by uuid references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table public.payments (
+  id uuid primary key default gen_random_uuid(),
+  procurement_id uuid unique not null references public.procurements(id) on delete cascade,
+  transaction_id text unique not null,
+  amount numeric(12,2) not null,
+  status public.payment_status not null default 'processing',
+  paid_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  farmer_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null,
+  message text not null,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create or replace function public.is_role(required_role public.app_role)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.profiles where id = auth.uid() and role = required_role);
+$$;
+
+alter table public.profiles enable row level security;
+alter table public.procurement_centres enable row level security;
+alter table public.crops enable row level security;
+alter table public.bookings enable row level security;
+alter table public.weighings enable row level security;
+alter table public.quality_inspections enable row level security;
+alter table public.procurements enable row level security;
+alter table public.payments enable row level security;
+alter table public.notifications enable row level security;
+
+create policy "profiles read own or staff" on public.profiles for select using (id = auth.uid() or public.is_role('admin'));
+create policy "profiles update own" on public.profiles for update using (id = auth.uid());
+create policy "centres public read" on public.procurement_centres for select using (true);
+create policy "farmers manage own crops" on public.crops for all using (farmer_id = auth.uid()) with check (farmer_id = auth.uid());
+create policy "farmers read own bookings" on public.bookings for select using (farmer_id = auth.uid() or public.is_role('operator') or public.is_role('inspector') or public.is_role('admin'));
+create policy "farmers create bookings" on public.bookings for insert with check (farmer_id = auth.uid());
+create policy "staff update bookings" on public.bookings for update using (public.is_role('operator') or public.is_role('admin'));
+create policy "booking staff read weighing" on public.weighings for select using (exists (select 1 from public.bookings b where b.id = booking_id and (b.farmer_id = auth.uid() or public.is_role('operator') or public.is_role('admin'))));
+create policy "operator create weighing" on public.weighings for insert with check (public.is_role('operator'));
+create policy "booking staff read quality" on public.quality_inspections for select using (exists (select 1 from public.bookings b where b.id = booking_id and (b.farmer_id = auth.uid() or public.is_role('inspector') or public.is_role('admin'))));
+create policy "inspector create quality" on public.quality_inspections for insert with check (public.is_role('inspector'));
+create policy "procurement participants read" on public.procurements for select using (exists (select 1 from public.bookings b where b.id = booking_id and (b.farmer_id = auth.uid() or public.is_role('operator') or public.is_role('admin'))));
+create policy "operator create procurement" on public.procurements for insert with check (public.is_role('operator'));
+create policy "farmers read own payments" on public.payments for select using (exists (select 1 from public.procurements p join public.bookings b on b.id = p.booking_id where p.id = procurement_id and (b.farmer_id = auth.uid() or public.is_role('admin'))));
+create policy "farmers read own notifications" on public.notifications for select using (farmer_id = auth.uid());
+create policy "farmers update own notifications" on public.notifications for update using (farmer_id = auth.uid());
+
+insert into public.procurement_centres (name, address, distance_km, daily_capacity_q, remaining_capacity_q, waiting_farmers, estimated_wait_minutes, status)
+values
+ ('Centre A', 'Main Market Yard, Village Road', 5.2, 300, 180, 42, 80, 'Normal'),
+ ('Centre B', 'Agriculture Office Road', 9.8, 300, 80, 85, 180, 'Busy'),
+ ('Centre C', 'Block Development Campus', 12.4, 400, 20, 210, 250, 'Critical'),
+ ('Centre D', 'Highway Service Lane', 15.1, 450, 240, 25, 45, 'Normal')
+ on conflict do nothing;
